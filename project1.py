@@ -306,7 +306,7 @@ def extract_solution(solution: list, m: int, sum_ns_times_n: int):
     # Get literals referent to switch relative placement
     switch_positions = [1]
     if m > 1:
-        for x in [sum_ns_times_n + x * x for x in range(1, m + 1)]:
+        for x in [sum_ns_times_n + (x - 1) * m + x for x in range(1, m + 1)]:
             if x in solution:
                 switch_order_solution.remove(x)
             elif -x in solution:
