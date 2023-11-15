@@ -2,7 +2,7 @@
 # alc23 - 13 - project2 
 # DO NOT remove or edit the lines above. Thank you.
 
-# import time
+import time
 from operator import itemgetter
 from inout import *
 from z3 import *
@@ -104,58 +104,72 @@ def partial_soft_clause_smt(hard_clauses, soft_clauses, n, f):
     assertions = []
     partition, connection = soft_clause_partitioning(n, f)
     lambdas = [0] * len(partition)
+    relaxed_clauses= []
+    relaxation_variables = []
 
     new_solver = Optimize()
 
     for community, clauses in enumerate(partition):
-        soft = [soft_clauses[int(index)] for index in clauses]
+        relaxed_clauses.append([])
+        relaxation_variables.append([])
+
+        for index, clause in enumerate([soft_clauses[int(index)] for index in clauses]):
+            relaxation_variables[community].append(Bool(f"r_{community}_{index}"))
+            relaxed_clauses[community].append(Or(clause, relaxation_variables[community][index]))
+ 
         new_solver.assert_exprs(hard_assertions)
-        new_solver.add_soft(soft)
+        new_solver.add(relaxed_clauses[community])
+        new_solver.add(AtMost(*(relaxation_variables[community]), 0))
+
         while new_solver.check() != sat:
-            r = []
-            for i, soft_clause in enumerate(soft):
-                if not is_true(new_solver.model().eval(soft_clause)):
-                    r.append(Bool(f"r_{community}_{i}"))
-                    soft.pop(i)
-                    soft.append(Or(soft_clause, r[-1]))
             lambdas[community] = lambdas[community] + 1
             new_solver = Optimize()
             new_solver.assert_exprs(hard_assertions)
-            new_solver.add_soft(soft)
-            new_solver.add_soft(AtMost(r, lambdas[community]))
+            new_solver.add(relaxed_clauses[community])
+            new_solver.add(AtMost(*(relaxation_variables[community]), lambdas[community]))
+
         assertions.append(new_solver.assertions())
         new_solver = Optimize()
+        print("partition: ", community, " / unsatisfied soft clauses: ", lambdas[community])
 
-    # c = 0
+    c = 0
     while len(partition) > 1:
         first_community, second_community, connection = decide_merger(connection)
-        first_clause_set = partition.pop(second_community if first_community < second_community else first_community)
+        c1 = partition.pop(second_community if first_community < second_community else first_community)
+        c2 = partition.pop(second_community if first_community > second_community else first_community)
+        partition.append(c1 + c2)
+        first_clause_set = relaxed_clauses.pop(second_community if first_community < second_community else first_community)
         first_set_assertions = assertions.pop(second_community if first_community < second_community else first_community)
-        second_clause_set = partition.pop(first_community if first_community < second_community else second_community)
+        second_clause_set = relaxed_clauses.pop(first_community if first_community < second_community else second_community)
         second_set_assertions = assertions.pop(first_community if first_community < second_community else second_community)
+        first_relaxation_variable_set = relaxation_variables.pop(second_community if first_community < second_community else first_community)
+        second_relaxation_variable_set = relaxation_variables.pop(second_community if first_community > second_community else first_community)
+        first_lambda = lambdas.pop(second_community if first_community < second_community else first_community)
+        second_lambda = lambdas.pop(second_community if first_community > second_community else first_community)
+
         new_clause_set = first_clause_set + second_clause_set
+        new_relaxation_variable_set = first_relaxation_variable_set + second_relaxation_variable_set
+        new_lambda = first_lambda + second_lambda
         new_solver = Optimize()
         new_solver.assert_exprs(hard_assertions)
-        new_solver.assert_exprs(first_set_assertions)
-        new_solver.assert_exprs(second_set_assertions)
-        new_solver.add_soft([soft_clauses[int(index)] for index in new_clause_set])
+        new_solver.add(new_clause_set)
+        new_solver.add(AtMost(*new_relaxation_variable_set, new_lambda))
+
+        # MAXSAT FM algorithm
         while new_solver.check() != sat:
             print("unsat")
-            r = []
-            for i, soft_clause in enumerate(soft):
-                if not is_true(new_solver.model().eval(soft_clause)):
-                    r.append(Bool(f"r_{c}_{i}"))
-                    soft.pop(i)
-                    soft.append(Or(soft_clause, r[-1]))
-            lambdas[c] = lambdas[c] + 1
+            new_lambda = new_lambda + 1
             new_solver = Optimize()
             new_solver.assert_exprs(hard_assertions)
-            new_solver.add_soft(soft)
-            new_solver.add_soft(AtMost(r, lambdas[c]))
+            new_solver.add(new_clause_set)
+            new_solver.add(AtMost(*new_relaxation_variable_set, new_lambda))
+
         assertions.append(new_solver.assertions())
-        partition.append(new_clause_set)
-        # c += 1
-        # print("merge: ", c, " / ", "length: ", len(partition))
+        relaxed_clauses.append(new_clause_set)
+        relaxation_variables.append(new_relaxation_variable_set)
+        lambdas.append(new_lambda)
+        c += 1
+        print("merge: ", c, " / ", "length: ", len(partition))
     return new_solver.model()
 
 
@@ -241,9 +255,9 @@ def main():
     # print results ##############################################################################
     ##############################################################################################
 
-    # start = time.time()
+    start = time.time()
     model = partial_soft_clause_smt(solver, soft_clauses, n, f)
-    # print(time.time() - start)
+    print(time.time() - start)
 
     recirculations = 0
     switches = [[] for _ in range(1, n + 1)]
