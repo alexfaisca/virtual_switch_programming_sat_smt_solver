@@ -74,37 +74,49 @@ def soft_clause_partitioning(n, f):
     return filtered_communities, connection_strength
 
 
-def decide_merger(connection_strength):
+def decide_merger(partition, connection_strength, relaxed_clauses, relaxation_variables, lambdas):
     # Get max strength of connection between any two communities
     first_community, temp = \
         max(enumerate((max(enumerate(vec), key=itemgetter(1))) for vec in connection_strength), key=itemgetter(1, 1))
     second_community, strength = temp
     # get new partition connection strength vector
-    first_strength_vector = connection_strength.pop(second_community if first_community < second_community else first_community)
-    second_strength_vector = connection_strength.pop(first_community if first_community < second_community else second_community)
+    if first_community > second_community:
+        temp = first_community
+        first_community = second_community
+        second_community = temp
+
+    first_strength_vector = connection_strength.pop(second_community)
+    second_strength_vector = connection_strength.pop(first_community)
     strength_vector = [x + y for x, y in zip(first_strength_vector, second_strength_vector)]
-    strength_vector.pop(second_community if first_community < second_community else first_community)
-    strength_vector.pop(first_community if first_community < second_community else second_community)
+    strength_vector.pop(second_community)
+    strength_vector.pop(first_community)
     strength_vector.append(0)
     for community, vector in enumerate(connection_strength):
-        first_community_connection = vector.pop(second_community if first_community < second_community else first_community)
-        second_community_connection = vector.pop(first_community if first_community < second_community else second_community)
+        first_community_connection = vector.pop(second_community)
+        second_community_connection = vector.pop(first_community)
         connection_strength[community].append(first_community_connection + second_community_connection)
     connection_strength.append(strength_vector)
-    return first_community, second_community, connection_strength
 
 
-def partial_soft_clause_smt(hard_clauses, soft_clauses, n, f):
-    solver = hard_clauses
+    first_clause_set = relaxed_clauses.pop(second_community)
+    second_clause_set = relaxed_clauses.pop(first_community)
+    relaxed_clauses.append(first_clause_set + second_clause_set)
+    first_relaxation_variable_set = relaxation_variables.pop(second_community)
+    second_relaxation_variable_set = relaxation_variables.pop(first_community)
+    relaxation_variables.append(first_relaxation_variable_set + second_relaxation_variable_set)
+    first_lambda = lambdas.pop(second_community)
+    second_lambda = lambdas.pop(first_community)
+    lambdas.append(first_lambda + second_lambda)
+    first = partition.pop(second_community)
+    second = partition.pop(first_community)
+    partition.append(first + second)
 
-    if not solver.check():
-        raise Exception("UNSATISFIABLE")
+    return relaxed_clauses, relaxation_variables, lambdas, partition, connection_strength
 
-    hard_assertions = solver.assertions()
-    assertions = []
-    partition, connection = soft_clause_partitioning(n, f)
+
+def parial_solver_initialize(hard_assertions, partition, soft_clauses):
     lambdas = [0] * len(partition)
-    relaxed_clauses= []
+    relaxed_clauses = []
     relaxation_variables = []
 
     new_solver = Optimize()
@@ -128,48 +140,41 @@ def partial_soft_clause_smt(hard_clauses, soft_clauses, n, f):
             new_solver.add(relaxed_clauses[community])
             new_solver.add(AtMost(*(relaxation_variables[community]), lambdas[community]))
 
-        assertions.append(new_solver.assertions())
         new_solver = Optimize()
         print("partition: ", community, " / unsatisfied soft clauses: ", lambdas[community])
 
-    c = 0
-    while len(partition) > 1:
-        first_community, second_community, connection = decide_merger(connection)
-        c1 = partition.pop(second_community if first_community < second_community else first_community)
-        c2 = partition.pop(second_community if first_community > second_community else first_community)
-        partition.append(c1 + c2)
-        first_clause_set = relaxed_clauses.pop(second_community if first_community < second_community else first_community)
-        first_set_assertions = assertions.pop(second_community if first_community < second_community else first_community)
-        second_clause_set = relaxed_clauses.pop(first_community if first_community < second_community else second_community)
-        second_set_assertions = assertions.pop(first_community if first_community < second_community else second_community)
-        first_relaxation_variable_set = relaxation_variables.pop(second_community if first_community < second_community else first_community)
-        second_relaxation_variable_set = relaxation_variables.pop(second_community if first_community > second_community else first_community)
-        first_lambda = lambdas.pop(second_community if first_community < second_community else first_community)
-        second_lambda = lambdas.pop(second_community if first_community > second_community else first_community)
+    return lambdas, relaxation_variables, relaxed_clauses
 
-        new_clause_set = first_clause_set + second_clause_set
-        new_relaxation_variable_set = first_relaxation_variable_set + second_relaxation_variable_set
-        new_lambda = first_lambda + second_lambda
+
+
+def partial_soft_clause_smt(solver, soft_clauses, n, f):
+    if not solver.check():
+        raise Exception("UNSATISFIABLE")
+
+    hard_assertions = solver.assertions()
+    partition, connection = soft_clause_partitioning(n, f)
+
+    lambdas, relaxation_variables, relaxed_clauses = parial_solver_initialize(hard_assertions, partition, soft_clauses)
+
+    while len(partition) > 1:
+        relaxed_clauses, relaxation_variables, lambdas, parition, connection = decide_merger(partition, connection, relaxed_clauses, relaxation_variables, lambdas)
+
         new_solver = Optimize()
         new_solver.assert_exprs(hard_assertions)
-        new_solver.add(new_clause_set)
-        new_solver.add(AtMost(*new_relaxation_variable_set, new_lambda))
+        new_solver.add(relaxed_clauses[-1])
+        new_solver.add(AtMost(*relaxation_variables[-1], lambdas[-1]))
 
         # MAXSAT FM algorithm
         while new_solver.check() != sat:
             print("unsat")
-            new_lambda = new_lambda + 1
+            lambdas[-1] = lambdas[-1] + 1
             new_solver = Optimize()
             new_solver.assert_exprs(hard_assertions)
-            new_solver.add(new_clause_set)
-            new_solver.add(AtMost(*new_relaxation_variable_set, new_lambda))
+            new_solver.add(relaxed_clauses[-1])
+            new_solver.add(AtMost(*relaxation_variables[-1], lambdas[-1]))
 
-        assertions.append(new_solver.assertions())
-        relaxed_clauses.append(new_clause_set)
-        relaxation_variables.append(new_relaxation_variable_set)
-        lambdas.append(new_lambda)
-        c += 1
-        print("merge: ", c, " / ", "length: ", len(partition))
+        print("merge (",len(partition) - 1, "remaining merges )")
+
     return new_solver.model()
 
 
