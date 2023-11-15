@@ -4,5 +4,5 @@
 
 
 ```
-python3 project2.py < test1.arp > test1.myout 
+python3 project2.py < instance.arp > solution.out 
 ```
