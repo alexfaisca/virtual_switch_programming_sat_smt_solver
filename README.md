@@ -11,11 +11,11 @@ In order to install the necessary dependencies from the main directory run:
 
 Following this, to run the project from the main directory simply run the main python file as follows:
 
-For the SAT solver use:
+## SAT solver:
 
 ### python3 project1.py < instance.apr > solution.out
 
-For the SMT solver use:
+## SMT solver:
 
 ### python3 project2.py < instance.apr > solution.out
 
