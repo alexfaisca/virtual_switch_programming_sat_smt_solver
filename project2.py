@@ -74,11 +74,12 @@ def soft_clause_partitioning(n, f):
     return filtered_communities, connection_strength
 
 
-def decide_merger(partition, connection_strength, relaxed_clauses, relaxation_variables, lambdas):
+def decide_merger(connection_strength, relaxed_clauses, relaxation_variables, lambdas):
     # Get max strength of connection between any two communities
     first_community, temp = \
         max(enumerate((max(enumerate(vec), key=itemgetter(1))) for vec in connection_strength), key=itemgetter(1, 1))
     second_community, strength = temp
+
     # get new partition connection strength vector
     if first_community > second_community:
         temp = first_community
@@ -97,7 +98,7 @@ def decide_merger(partition, connection_strength, relaxed_clauses, relaxation_va
         connection_strength[community].append(first_community_connection + second_community_connection)
     connection_strength.append(strength_vector)
 
-
+    # Update clause partitions
     first_clause_set = relaxed_clauses.pop(second_community)
     second_clause_set = relaxed_clauses.pop(first_community)
     relaxed_clauses.append(first_clause_set + second_clause_set)
@@ -107,11 +108,8 @@ def decide_merger(partition, connection_strength, relaxed_clauses, relaxation_va
     first_lambda = lambdas.pop(second_community)
     second_lambda = lambdas.pop(first_community)
     lambdas.append(first_lambda + second_lambda)
-    first = partition.pop(second_community)
-    second = partition.pop(first_community)
-    partition.append(first + second)
 
-    return relaxed_clauses, relaxation_variables, lambdas, partition, connection_strength
+    return relaxed_clauses, relaxation_variables, lambdas, connection_strength
 
 
 def parial_solver_initialize(hard_assertions, partition, soft_clauses):
@@ -156,8 +154,8 @@ def partial_soft_clause_smt(solver, soft_clauses, n, f):
 
     lambdas, relaxation_variables, relaxed_clauses = parial_solver_initialize(hard_assertions, partition, soft_clauses)
 
-    while len(partition) > 1:
-        relaxed_clauses, relaxation_variables, lambdas, parition, connection = decide_merger(partition, connection, relaxed_clauses, relaxation_variables, lambdas)
+    while len(relaxed_clauses) > 1:
+        relaxed_clauses, relaxation_variables, lambdas, connection = decide_merger(connection, relaxed_clauses, relaxation_variables, lambdas)
 
         new_solver = Optimize()
         new_solver.assert_exprs(hard_assertions)
@@ -173,7 +171,7 @@ def partial_soft_clause_smt(solver, soft_clauses, n, f):
             new_solver.add(relaxed_clauses[-1])
             new_solver.add(AtMost(*relaxation_variables[-1], lambdas[-1]))
 
-        print("merge (",len(partition) - 1, "remaining merges )")
+        print("merge (", len(relaxed_clauses) - 1, "remaining merges )")
 
     return new_solver.model()
 
