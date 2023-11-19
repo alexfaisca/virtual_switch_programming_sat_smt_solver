@@ -115,8 +115,6 @@ def partial_solver_initialize(hard_assertions, partition, soft_clauses):
     relaxed_clauses = []
     relaxation_variables = []
 
-    new_solver = Optimize()
-
     for community, clauses in enumerate(partition):
         relaxed_clauses.append([])
         relaxation_variables.append([])
@@ -124,27 +122,32 @@ def partial_solver_initialize(hard_assertions, partition, soft_clauses):
         for index, clause in enumerate([soft_clauses[int(index)] for index in clauses]):
             relaxation_variables[community].append(Bool(f"r_{community}_{index}"))
             relaxed_clauses[community].append(Or(clause, relaxation_variables[community][index]))
+        
+        new_solver = Optimize()
  
         new_solver.assert_exprs(hard_assertions)
-        new_solver.add(relaxed_clauses[community])
+        for index, clause in enumerate(relaxed_clauses[community]):
+            new_solver.assert_and_track(clause, f"p{index}")
         new_solver.add(AtMost(*(relaxation_variables[community]), 0))
 
         while new_solver.check() != sat:
+            print(new_solver.unsat_core(), "done")
             lambdas[community] = lambdas[community] + 1
             new_solver = Optimize()
             new_solver.assert_exprs(hard_assertions)
             new_solver.add(relaxed_clauses[community])
             new_solver.add(AtMost(*(relaxation_variables[community]), lambdas[community]))
 
-        new_solver = Optimize()
         print("partition: ", community, " / unsatisfied soft clauses: ", lambdas[community])
 
     return lambdas, relaxation_variables, relaxed_clauses
 
 
-
-def partial_soft_clause_smt(solver, soft_clauses, n, f):
-    if not solver.check():
+# MaxSAT Divide and Conquer through community finding emplying basic incremental algorithm
+def partial_soft_clause_smt(hard_clauses, soft_clauses, n, f):
+    solver = Optimize()
+    solver.assert_exprs(hard_clauses)
+    if solver.check() != sat:
         raise Exception("UNSATISFIABLE")
 
     hard_assertions = solver.assertions()
@@ -157,12 +160,13 @@ def partial_soft_clause_smt(solver, soft_clauses, n, f):
 
         new_solver = Optimize()
         new_solver.assert_exprs(hard_assertions)
-        new_solver.add(relaxed_clauses[-1])
-        new_solver.add(AtMost(*relaxation_variables[-1], lambdas[-1]))
+        for index, clause in enumerate(relaxed_clauses[-1]):
+            new_solver.assert_and_track(clause, f"{index}")
+        new_solver.add(AtMost(*(relaxation_variables[-1]), lambdas[-1]))
 
         # MAXSAT FM algorithm
         while new_solver.check() != sat:
-            print("unsat")
+            print(new_solver.unsat_core(), "done")
             lambdas[-1] = lambdas[-1] + 1
             new_solver = Optimize()
             new_solver.assert_exprs(hard_assertions)
@@ -171,7 +175,181 @@ def partial_soft_clause_smt(solver, soft_clauses, n, f):
 
         print("merge (", len(relaxed_clauses) - 1, "remaining merges )")
 
-    return new_solver.model()
+    return new_solver.model(), lambdas[-1]
+
+
+# MaxSAT MSU3 Algorithm
+def max_sat_msu3(hard_clauses, soft_clauses):
+    # Check if formula is staisfiable
+    solver = Optimize()
+    solver.assert_exprs(hard_clauses)
+    if solver.check() != sat:
+        raise Exception("UNSATISFIABLE")
+
+    # Optimize solution
+    relaxed_clauses = []
+    relaxation_variables = []
+    cost = 0
+    hard_clauses = solver.assertions()
+    relaxed = []
+
+    solver = Optimize()
+    solver.assert_exprs(hard_clauses)
+    for index, clause in enumerate(soft_clauses):
+        relaxation_variables.append(Bool(f"r_{index}"))
+        relaxed_clauses.append(Or(clause, relaxation_variables[index]))
+        solver.assert_and_track(soft_clauses[index], f"{index}")
+
+    while solver.check() != sat:
+        cost = cost + 1
+
+        unsat_core = []
+        for clause in solver.unsat_core():
+            unsat_core.append(relaxation_variables[int(str(clause))])
+            relaxed.append(int(str(clause)))
+
+        solver = Optimize()
+        solver.assert_exprs(hard_clauses)
+        for index, clause in enumerate(relaxed_clauses):
+            solver.assert_and_track(clause, f"{index}")
+        solver.add(AtMost(*list(set(clauses)), cost))
+
+        # Stress clauses not yet having been part of an unsat core
+        clauses = []
+        for c in relaxed:
+            clauses.append(relaxation_variables[c])
+        for c in relaxation_variables:
+            if c not in clauses:
+                solver.add(Not(c))
+        
+    return solver.model(), cost
+
+
+# MaxSAT Fu&Malik's Algorithm
+def max_sat_fm(hard_clauses, soft_clauses):
+    # Assert formula is satisfiable
+    solver = Optimize()
+    solver.assert_exprs(hard_clauses)
+    if solver.check() != sat:
+        raise Exception("UNSATISFIABLE")
+
+    # Optimize solution
+    cost = 0
+    at_most = []
+
+    solver = Optimize()
+    solver.assert_exprs(hard_clauses)
+    for index, clause in enumerate(soft_clauses):
+        solver.assert_and_track(soft_clauses[index], f"{index}")
+
+    while solver.check() != sat:
+        print("unsat")
+        cost = cost + 1
+
+        r = []
+        for clause in solver.unsat_core():
+            index = int(str(clause))
+            r.append(Bool(f"r_{cost}_{index}"))
+            soft_clauses[index] = Or(soft_clauses[index], r[-1])
+        at_most.append(AtMost(*r, 1))
+
+        solver = Optimize()
+        solver.assert_exprs(hard_clauses)
+        for index, clause in enumerate(soft_clauses):
+            solver.assert_and_track(clause, f"{index}")
+
+        for constraint in at_most:
+            solver.add(constraint)
+        
+    return solver.model(), cost
+
+
+# MaxSAT PM2 Algorithm
+def max_sat_pm2(hard_clauses, soft_clauses):
+    # Assert formula is satisfiable
+    solver = Optimize()
+    solver.assert_exprs(hard_clauses)
+    if solver.check() != sat:
+        raise Exception("UNSATISFIABLE")
+
+    # Optimize soltion
+    relaxed_clauses = []
+    relaxation_variables = []
+    cost = 0
+    unsat_cores = []
+    at_least = []
+
+    solver = Optimize()
+    solver.assert_exprs(hard_clauses)
+    for index, clause in enumerate(soft_clauses):
+        relaxation_variables.append(Bool(f"r_{index}"))
+        relaxed_clauses.append(Or(clause, relaxation_variables[index]))
+        solver.assert_and_track(relaxed_clauses[index], f"{index}")
+
+    solver.add(AtMost(*relaxation_variables, 0))
+
+    while solver.check() != sat:
+        print("unsat")
+        cost = cost + 1
+
+        core = []
+        for clause in solver.unsat_core():
+            core.append(int(str(clause)))
+
+        cover = 1
+        for c in unsat_cores:
+            if max([True if el not in core else False for el in c]):
+                continue
+            cover = cover + 1
+        unsat_cores = []
+        at_most.append(AtMost(*core, cover))
+        at_least.append(AtLeast(*core, cover))
+
+        solver = Optimize()
+        solver.assert_exprs(hard_clauses)
+        for index, clause in enumerate(soft_clauses):
+            solver.assert_and_track(clause, f"{index}")
+
+        for constraint in at_most:
+            solver.add(constraint)
+        
+    return solver.model(), cost
+
+
+# MaxSAT simple incremental Algorithm
+def max_sat_inc(hard_clauses, soft_clauses):
+    # Check if formula is satisfiable
+    solver = Optimize()
+    solver.add(hard_clauses)
+    if solver.check() != sat:
+        raise Exception("UNSATISFIABLE")
+
+    # Optimize soltion
+    relaxed_clauses = []
+    relaxation_variables = []
+    cost = 0
+    unsat_cores = []
+    at_least = []
+
+    solver = Optimize()
+    solver.assert_exprs(hard_clauses)
+    for index, clause in enumerate(soft_clauses):
+        relaxation_variables.append(Bool(f"r_{index}"))
+        relaxed_clauses.append(Or(clause, relaxation_variables[index]))
+        solver.assert_exprs(relaxed_clauses[index])
+
+    solver.add(AtMost(*relaxation_variables, cost))
+
+    while solver.check() != sat:
+        print("unsat")
+        cost = cost + 1
+
+        solver = Optimize()
+        solver.assert_exprs(hard_clauses)
+        solver.assert_exprs(relaxed_clauses)
+        solver.add(AtMost(*relaxation_variables, cost))
+    
+    return solver.model(), cost
 
 
 def main():
@@ -198,18 +376,6 @@ def main():
             # Constraint 1.2.1
             solver.add(0 < Sum(*parcels))
             solver.add(Sum(*parcels) <= mc[switch - 1])
-
-    # Objective function minimization
-    soft_clauses = []
-    for preceding_rule, succeeding_rule in f:
-        soft_clauses.append(
-            Not(
-                And(
-                    placement[preceding_rule - 1][0] == placement[succeeding_rule - 1][0],
-                    placement[succeeding_rule - 1][1] - placement[preceding_rule - 1][1] <= 0
-                )
-            )
-        )
 
     switch_positions = [i for i in range(1, m + 1)]
 
@@ -252,15 +418,30 @@ def main():
                             )
                         )
 
+    # Objective function minimization (soft clauses)
+    soft_clauses = []
+    for preceding_rule, succeeding_rule in f:
+        soft_clauses.append(
+            Not(
+                And(
+                    placement[preceding_rule - 1][0] == placement[succeeding_rule - 1][0],
+                    placement[succeeding_rule - 1][1] - placement[preceding_rule - 1][1] <= 0
+                )
+            )
+        )
+
     ##############################################################################################
     # print results ##############################################################################
     ##############################################################################################
 
     start = time.time()
-    model = partial_soft_clause_smt(solver, soft_clauses, n, f)
+    # Through trial and error this was found to be the fastest implementation between all those 
+    # tried, see above for the different algorithms tested (several variables influence these
+    # results, e.g. z3's Solver::assert_and_track is much slower than a simple 
+    # Solver::assert_exprs)
+    model, recirculations = max_sat_inc(solver.assertions(), soft_clauses)
     print(time.time() - start)
 
-    recirculations = 0
     switches = [[] for _ in range(1, n + 1)]
     stages = [[] for _ in range(1, n + 1)]
     solution = [[[] for _ in range(ns[switch])] for switch in range(m)]
@@ -281,23 +462,6 @@ def main():
 
     for rule in range(1, n + 1):
         solution[switches[rule - 1][0] - 1][stages[rule - 1][0] - 1].append(int(rule))
-
-    # Count Recirculations
-    for switch in solution:
-        previous_stages = []
-        for current_stage in switch:
-            for index, rule_1 in enumerate(current_stage):
-                for rule_2 in current_stage[(index + 1):]:
-                    if rule_1 != rule_2:
-                        if ([rule_1, rule_2] in f) or ([rule_2, rule_1] in f):
-                            recirculations = recirculations + 1
-            if previous_stages is not Empty:
-                for rule_1 in current_stage:
-                    for rule_2 in previous_stages:
-                        if [rule_1, rule_2] in f:
-                            recirculations = recirculations + 1
-            for rule in current_stage:
-                previous_stages.append(rule)
 
     print(generate_output(recirculations, switch_positions, solution), end="")
 
