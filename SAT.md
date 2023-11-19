@@ -78,7 +78,7 @@ In order to install the necessary dependencies from the main directory run:
 
 Following this, to run the project from the main directory simply run the main python file as follows:
 
-### python3 project1.py < instance.apr > solution.out
+### python3 sat.py < instance.apr > solution.out
 
 instance.apr contains the formulation of the problem. 
 project1 writes the solution to the standard output, which can, however, be redirected to a certain file (e.g. solution.out).
