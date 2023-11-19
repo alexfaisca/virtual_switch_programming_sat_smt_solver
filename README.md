@@ -20,7 +20,9 @@ Following this, to run the project from the main directory simply run the main p
 ### python3 smt.py < instance.apr > solution.out
 
 instance.apr contains the formulation of the problem. 
-project1 writes the solution to the standard output, which can, however, be redirected to a certain file (e.g. solution.out).
+The solution is written to the standard output, but can, however, be redirected to a certain file (e.g. solution.out).
+A number of example problem formulations are available in /example_problems (from repository root).
+
 
 		
 
