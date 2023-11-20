@@ -110,34 +110,25 @@ def merge_partitions(connection_strength, relaxed_clauses, relaxation_variables,
     lambdas.append(first_lambda + second_lambda)
 
 
-def partial_solver_initialize(partition, hard_clauses, soft_clauses):
-    recirculations = [0] * len(partition)
-    relaxed_clauses = []
-    relaxation_variables = []
-
-    for community, clauses in enumerate(partition):
-        relaxed_clauses.append([])
-        relaxation_variables.append([])
-        partition_soft_clauses = [soft_clauses[int(index)] for index in clauses]
-        _, recirculations[community] = max_sat_inc(hard_clauses, partition_soft_clauses)
-        relaxed_clauses[community] = partition_soft_clauses
-
-    print(len(partition), "communities found")
-
-    return recirculations, relaxation_variables, relaxed_clauses
-
-
 # MaxSAT Divide and Conquer through community finding emplying basic incremental algorithm
 def divide_and_conquer_smt(hard_clauses, soft_clauses, n, f):
     solver = Optimize()
     solver.assert_exprs(hard_clauses)
     if solver.check() != sat:
         raise Exception("UNSATISFIABLE")
-    solver.push()
+
+    recirculations = [0] * len(partition)
+    partitioned_clauses = []
+    relaxation_variables = [] 
+    model = []
 
     partition, connection = soft_clause_partitioning(n, f)
-    model = []
-    recirculations, relaxation_variables, relaxed_clauses = partial_solver_initialize(partition, hard_clauses, soft_clauses)
+
+    for community, clauses in enumerate(partition):
+        partitioned_clauses.append([soft_clauses[int(index)] for index in clauses])
+        _, recirculations[community] = max_sat_inc(hard_clauses, partitioned_clauses[-1])
+
+    print(len(partition), "communities found")
 
     while len(relaxed_clauses) > 1:
         merge_partitions(connection, relaxed_clauses, relaxation_variables, recirculations)
@@ -228,53 +219,6 @@ def max_sat_fm(hard_clauses, soft_clauses):
     return solver.model(), recirculations
 
 
-# MaxSAT PM2 Algorithm
-    #def max_sat_pm2(hard_clauses, soft_clauses):
-    # Assert formula is satisfiable
-    #solver = Optimize()
-    #solver.assert_exprs(hard_clauses)
-    #if solver.check() != sat:
-    #   raise Exception("UNSATISFIABLE")
-
-    # Optimize solution
-    #relaxed_clauses = []
-    #relaxation_variables = []
-    #recirculations = 0
-    #unsat_cores = []
-    #at_least = []
-
-    #for index, clause in enumerate(soft_clauses):
-    #    relaxation_variables.append(Bool(f"r_{index}"))
-    #    relaxed_clauses.append(Or(clause, relaxation_variables[index]))
-    #    solver.assert_and_track(relaxed_clauses[index], f"{index}")
-    #solver.push()
-
-    #solver.add(AtMost(*relaxation_variables, recirculations))
-    #while solver.check() != sat:
-    #    solver.pop()
-    #    solver.push()
-    #    print("unsat")
-    #    recirculations = recirculations + 1
-
-    #    core = []
-    #    for clause in solver.unsat_core():
-    #        core.append(int(str(clause)))
-
-    #    cover = 1
-    #    for c in unsat_cores:
-    #        if max([True if el not in core else False for el in c]):
-    #            continue
-    #        cover = cover + 1
-    #    unsat_cores = []
-    #    at_most.append(AtMost(*core, cover))
-    #    at_least.append(AtLeast(*core, cover))
-
-    #    for constraint in at_most:
-    #        solver.add(constraint)
-        
-#return solver.model(), recirculations
-
-
 # MaxSAT simple incremental Algorithm
 def max_sat_inc(hard_clauses, soft_clauses, recirculations = 0):
     # Check if formula is satisfiable
@@ -282,6 +226,7 @@ def max_sat_inc(hard_clauses, soft_clauses, recirculations = 0):
     solver.add(hard_clauses)
     if solver.check() != sat:
         raise Exception("UNSATISFIABLE")
+    return solver.model(), 0
     
     # Optimize soltion
     relaxed_clauses = []
