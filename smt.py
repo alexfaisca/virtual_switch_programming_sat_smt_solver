@@ -110,7 +110,7 @@ def merge_partitions(connection_strength, relaxed_clauses, relaxation_variables,
     lambdas.append(first_lambda + second_lambda)
 
 
-def partial_solver_initialize(solver, partition, soft_clauses):
+def partial_solver_initialize(partition, hard_clauses, soft_clauses):
     recirculations = [0] * len(partition)
     relaxed_clauses = []
     relaxation_variables = []
@@ -118,22 +118,9 @@ def partial_solver_initialize(solver, partition, soft_clauses):
     for community, clauses in enumerate(partition):
         relaxed_clauses.append([])
         relaxation_variables.append([])
-
-        for index, clause in enumerate([soft_clauses[int(index)] for index in clauses]):
-            relaxation_variables[community].append(Bool(f"r_{community}_{index}"))
-            relaxed_clauses[community].append(Or(clause, relaxation_variables[community][index]))
-        solver.assert_exprs(relaxed_clauses[community])
-        solver.push()
-
-        for var in relaxation_variables[community]:
-            solver.add(Not(var))
-
-        while solver.check() != sat:
-            solver.pop()
-            solver.push()
-            recirculations[community] = recirculations[community] + 1
-            solver.add(AtMost(*(relaxation_variables[community]), recirculations[community]))
-        solver.pop()
+        partition_soft_clauses = [soft_clauses[int(index)] for index in clauses]
+        _, recirculations[community] = max_sat_inc(hard_clauses, partition_soft_clauses)
+        relaxed_clauses[community] = partition_soft_clauses
 
     print(len(partition), "communities found")
 
@@ -149,26 +136,12 @@ def divide_and_conquer_smt(hard_clauses, soft_clauses, n, f):
     solver.push()
 
     partition, connection = soft_clause_partitioning(n, f)
-
-    recirculations, relaxation_variables, relaxed_clauses = partial_solver_initialize(solver, partition, soft_clauses)
+    model = []
+    recirculations, relaxation_variables, relaxed_clauses = partial_solver_initialize(partition, hard_clauses, soft_clauses)
 
     while len(relaxed_clauses) > 1:
-        solver.pop()
-        solver.push()
         merge_partitions(connection, relaxed_clauses, relaxation_variables, recirculations)
-
-        solver.assert_exprs(relaxed_clauses[-1])
-        solver.push()
-
-        solver.add(AtMost(*(relaxation_variables[-1]), recirculations[-1]))
-
-        # MaxSAT ximple incremental algorithm
-        while solver.check() != sat:
-            solver.pop()
-            solver.push()
-            print("unsat @", len(relaxed_clauses) - 1, "merges remaining")
-            recirculations[-1] = recirculations[-1] + 1
-            solver.add(AtMost(*relaxation_variables[-1], recirculations[-1]))
+        model, recirculations[-1] = max_sat_inc(hard_clauses, relaxed_clauses[-1], recirculations[-1])
 
     return solver.model(), recirculations[-1]
 
@@ -303,7 +276,7 @@ def max_sat_fm(hard_clauses, soft_clauses):
 
 
 # MaxSAT simple incremental Algorithm
-def max_sat_inc(hard_clauses, soft_clauses):
+def max_sat_inc(hard_clauses, soft_clauses, recirculations = 0):
     # Check if formula is satisfiable
     solver = Optimize()
     solver.add(hard_clauses)
@@ -313,16 +286,18 @@ def max_sat_inc(hard_clauses, soft_clauses):
     # Optimize soltion
     relaxed_clauses = []
     relaxation_variables = []
-    recirculations = 0
 
     for index, clause in enumerate(soft_clauses):
         relaxation_variables.append(Bool(f"r_{index}"))
         relaxed_clauses.append(Or(clause, relaxation_variables[index]))
     solver.assert_exprs(relaxed_clauses)
     solver.push()
-
-    for var in relaxation_variables:
-        solver.add(Not(var))
+    
+    if recirculations == 0:
+       for var in relaxation_variables:
+            solver.add(Not(var))
+    else:
+        solver.add(AtMost(*relaxation_variables, recirculations))
 
     while solver.check() != sat:
         print("unsat")
