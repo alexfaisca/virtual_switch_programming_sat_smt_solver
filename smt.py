@@ -110,8 +110,8 @@ def merge_partitions(connection_strength, relaxed_clauses, relaxation_variables,
     lambdas.append(first_lambda + second_lambda)
 
 
-def partial_solver_initialize(hard_assertions, partition, soft_clauses):
-    lambdas = [0] * len(partition)
+def partial_solver_initialize(solver, partition, soft_clauses):
+    recirculations = [0] * len(partition)
     relaxed_clauses = []
     relaxation_variables = []
 
@@ -122,60 +122,55 @@ def partial_solver_initialize(hard_assertions, partition, soft_clauses):
         for index, clause in enumerate([soft_clauses[int(index)] for index in clauses]):
             relaxation_variables[community].append(Bool(f"r_{community}_{index}"))
             relaxed_clauses[community].append(Or(clause, relaxation_variables[community][index]))
-        
-        new_solver = Optimize()
- 
-        new_solver.assert_exprs(hard_assertions)
-        for index, clause in enumerate(relaxed_clauses[community]):
-            new_solver.assert_and_track(clause, f"p{index}")
-        new_solver.add(AtMost(*(relaxation_variables[community]), 0))
+        solver.assert_exprs(relaxed_clauses[community])
+        solver.push()
 
-        while new_solver.check() != sat:
-            print(new_solver.unsat_core(), "done")
-            lambdas[community] = lambdas[community] + 1
-            new_solver = Optimize()
-            new_solver.assert_exprs(hard_assertions)
-            new_solver.add(relaxed_clauses[community])
-            new_solver.add(AtMost(*(relaxation_variables[community]), lambdas[community]))
+        for var in relaxation_variables[community]:
+            solver.add(Not(var))
 
-        print("partition: ", community, " / unsatisfied soft clauses: ", lambdas[community])
+        while solver.check() != sat:
+            solver.pop()
+            solver.push()
+            recirculations[community] = recirculations[community] + 1
+            solver.add(AtMost(*(relaxation_variables[community]), recirculations[community]))
+        solver.pop()
 
-    return lambdas, relaxation_variables, relaxed_clauses
+    print(len(partition), "communities found")
+
+    return recirculations, relaxation_variables, relaxed_clauses
 
 
 # MaxSAT Divide and Conquer through community finding emplying basic incremental algorithm
-def partial_soft_clause_smt(hard_clauses, soft_clauses, n, f):
+def divide_and_conquer_smt(hard_clauses, soft_clauses, n, f):
     solver = Optimize()
     solver.assert_exprs(hard_clauses)
     if solver.check() != sat:
         raise Exception("UNSATISFIABLE")
+    solver.push()
 
-    hard_assertions = solver.assertions()
     partition, connection = soft_clause_partitioning(n, f)
 
-    lambdas, relaxation_variables, relaxed_clauses = partial_solver_initialize(hard_assertions, partition, soft_clauses)
+    recirculations, relaxation_variables, relaxed_clauses = partial_solver_initialize(solver, partition, soft_clauses)
 
     while len(relaxed_clauses) > 1:
-        merge_partitions(connection, relaxed_clauses, relaxation_variables, lambdas)
+        solver.pop()
+        solver.push()
+        merge_partitions(connection, relaxed_clauses, relaxation_variables, recirculations)
 
-        new_solver = Optimize()
-        new_solver.assert_exprs(hard_assertions)
-        for index, clause in enumerate(relaxed_clauses[-1]):
-            new_solver.assert_and_track(clause, f"{index}")
-        new_solver.add(AtMost(*(relaxation_variables[-1]), lambdas[-1]))
+        solver.assert_exprs(relaxed_clauses[-1])
+        solver.push()
 
-        # MAXSAT FM algorithm
-        while new_solver.check() != sat:
-            print(new_solver.unsat_core(), "done")
-            lambdas[-1] = lambdas[-1] + 1
-            new_solver = Optimize()
-            new_solver.assert_exprs(hard_assertions)
-            new_solver.add(relaxed_clauses[-1])
-            new_solver.add(AtMost(*relaxation_variables[-1], lambdas[-1]))
+        solver.add(AtMost(*(relaxation_variables[-1]), recirculations[-1]))
 
-        print("merge (", len(relaxed_clauses) - 1, "remaining merges )")
+        # MaxSAT ximple incremental algorithm
+        while solver.check() != sat:
+            solver.pop()
+            solver.push()
+            print("unsat @", len(relaxed_clauses) - 1, "merges remaining")
+            recirculations[-1] = recirculations[-1] + 1
+            solver.add(AtMost(*relaxation_variables[-1], recirculations[-1]))
 
-    return new_solver.model(), lambdas[-1]
+    return solver.model(), recirculations[-1]
 
 
 # MaxSAT MSU3 Algorithm
@@ -187,42 +182,38 @@ def max_sat_msu3(hard_clauses, soft_clauses):
         raise Exception("UNSATISFIABLE")
 
     # Optimize solution
-    relaxed_clauses = []
+    recirculations = 0
     relaxation_variables = []
-    cost = 0
-    hard_clauses = solver.assertions()
-    relaxed = []
+    relaxed = [False] * len(soft_clauses)
 
-    solver = Optimize()
-    solver.assert_exprs(hard_clauses)
     for index, clause in enumerate(soft_clauses):
         relaxation_variables.append(Bool(f"r_{index}"))
-        relaxed_clauses.append(Or(clause, relaxation_variables[index]))
+        soft_clauses[index] = Or(clause, relaxation_variables[-1])
         solver.assert_and_track(soft_clauses[index], f"{index}")
+    solver.push()
+
+    for var in relaxation_variables:
+        solver.add(Not(var))
 
     while solver.check() != sat:
-        cost = cost + 1
-
-        unsat_core = []
+        print("unsat")
         for clause in solver.unsat_core():
-            unsat_core.append(relaxation_variables[int(str(clause))])
-            relaxed.append(int(str(clause)))
+            relaxed[int(str(clause))] = True
 
-        solver = Optimize()
-        solver.assert_exprs(hard_clauses)
-        for index, clause in enumerate(relaxed_clauses):
-            solver.assert_and_track(clause, f"{index}")
-        solver.add(AtMost(*list(set(clauses)), cost))
+        solver.pop()
+        solver.push()
+        recirculations = recirculations + 1
 
-        # Stress clauses not yet having been part of an unsat core
-        clauses = []
-        for c in relaxed:
-            clauses.append(relaxation_variables[c])
-        for c in relaxation_variables:
-            if c not in clauses:
-                solver.add(Not(c))
+        # Stress clauses not yet having been part of an unsat core and AtMost-k on relaxed ones
+        at_most_vars = []
+        for index, var in enumerate(relaxation_variables):
+            if relaxed[index]:
+                at_most_vars.append(var)
+            else:
+                solver.assert_exprs(Not(var))
+        solver.add(AtMost(*at_most_vars, recirculations))
         
-    return solver.model(), cost
+    return solver.model(), recirculations
 
 
 # MaxSAT Fu&Malik's Algorithm
@@ -232,88 +223,83 @@ def max_sat_fm(hard_clauses, soft_clauses):
     solver.assert_exprs(hard_clauses)
     if solver.check() != sat:
         raise Exception("UNSATISFIABLE")
+    solver.push()
 
     # Optimize solution
-    cost = 0
+    recirculations = 0
     at_most = []
 
-    solver = Optimize()
-    solver.assert_exprs(hard_clauses)
     for index, clause in enumerate(soft_clauses):
         solver.assert_and_track(soft_clauses[index], f"{index}")
 
     while solver.check() != sat:
+        solver.pop()
+        solver.push()
         print("unsat")
-        cost = cost + 1
+        recirculations = recirculations + 1
 
+        # Relax unsat core
         r = []
         for clause in solver.unsat_core():
             index = int(str(clause))
-            r.append(Bool(f"r_{cost}_{index}"))
+            r.append(Bool(f"r_{recirculations}_{index}"))
             soft_clauses[index] = Or(soft_clauses[index], r[-1])
         at_most.append(AtMost(*r, 1))
-
-        solver = Optimize()
-        solver.assert_exprs(hard_clauses)
+        
+        # Add updated soft clauses
         for index, clause in enumerate(soft_clauses):
             solver.assert_and_track(clause, f"{index}")
-
         for constraint in at_most:
             solver.add(constraint)
         
-    return solver.model(), cost
+    return solver.model(), recirculations
 
 
 # MaxSAT PM2 Algorithm
-def max_sat_pm2(hard_clauses, soft_clauses):
+    #def max_sat_pm2(hard_clauses, soft_clauses):
     # Assert formula is satisfiable
-    solver = Optimize()
-    solver.assert_exprs(hard_clauses)
-    if solver.check() != sat:
-        raise Exception("UNSATISFIABLE")
+    #solver = Optimize()
+    #solver.assert_exprs(hard_clauses)
+    #if solver.check() != sat:
+    #   raise Exception("UNSATISFIABLE")
 
-    # Optimize soltion
-    relaxed_clauses = []
-    relaxation_variables = []
-    cost = 0
-    unsat_cores = []
-    at_least = []
+    # Optimize solution
+    #relaxed_clauses = []
+    #relaxation_variables = []
+    #recirculations = 0
+    #unsat_cores = []
+    #at_least = []
 
-    solver = Optimize()
-    solver.assert_exprs(hard_clauses)
-    for index, clause in enumerate(soft_clauses):
-        relaxation_variables.append(Bool(f"r_{index}"))
-        relaxed_clauses.append(Or(clause, relaxation_variables[index]))
-        solver.assert_and_track(relaxed_clauses[index], f"{index}")
+    #for index, clause in enumerate(soft_clauses):
+    #    relaxation_variables.append(Bool(f"r_{index}"))
+    #    relaxed_clauses.append(Or(clause, relaxation_variables[index]))
+    #    solver.assert_and_track(relaxed_clauses[index], f"{index}")
+    #solver.push()
 
-    solver.add(AtMost(*relaxation_variables, 0))
+    #solver.add(AtMost(*relaxation_variables, recirculations))
+    #while solver.check() != sat:
+    #    solver.pop()
+    #    solver.push()
+    #    print("unsat")
+    #    recirculations = recirculations + 1
 
-    while solver.check() != sat:
-        print("unsat")
-        cost = cost + 1
+    #    core = []
+    #    for clause in solver.unsat_core():
+    #        core.append(int(str(clause)))
 
-        core = []
-        for clause in solver.unsat_core():
-            core.append(int(str(clause)))
+    #    cover = 1
+    #    for c in unsat_cores:
+    #        if max([True if el not in core else False for el in c]):
+    #            continue
+    #        cover = cover + 1
+    #    unsat_cores = []
+    #    at_most.append(AtMost(*core, cover))
+    #    at_least.append(AtLeast(*core, cover))
 
-        cover = 1
-        for c in unsat_cores:
-            if max([True if el not in core else False for el in c]):
-                continue
-            cover = cover + 1
-        unsat_cores = []
-        at_most.append(AtMost(*core, cover))
-        at_least.append(AtLeast(*core, cover))
-
-        solver = Optimize()
-        solver.assert_exprs(hard_clauses)
-        for index, clause in enumerate(soft_clauses):
-            solver.assert_and_track(clause, f"{index}")
-
-        for constraint in at_most:
-            solver.add(constraint)
+    #    for constraint in at_most:
+    #        solver.add(constraint)
         
-    return solver.model(), cost
+#return solver.model(), recirculations
 
 
 # MaxSAT simple incremental Algorithm
@@ -323,49 +309,42 @@ def max_sat_inc(hard_clauses, soft_clauses):
     solver.add(hard_clauses)
     if solver.check() != sat:
         raise Exception("UNSATISFIABLE")
-
+    
     # Optimize soltion
     relaxed_clauses = []
     relaxation_variables = []
-    cost = 0
-    unsat_cores = []
-    at_least = []
+    recirculations = 0
 
-    solver = Optimize()
-    solver.assert_exprs(hard_clauses)
     for index, clause in enumerate(soft_clauses):
         relaxation_variables.append(Bool(f"r_{index}"))
         relaxed_clauses.append(Or(clause, relaxation_variables[index]))
-        solver.assert_exprs(relaxed_clauses[index])
+    solver.assert_exprs(relaxed_clauses)
+    solver.push()
 
-    solver.add(AtMost(*relaxation_variables, cost))
+    for var in relaxation_variables:
+        solver.add(Not(var))
 
     while solver.check() != sat:
         print("unsat")
-        cost = cost + 1
-
-        solver = Optimize()
-        solver.assert_exprs(hard_clauses)
-        solver.assert_exprs(relaxed_clauses)
-        solver.add(AtMost(*relaxation_variables, cost))
+        solver.pop()
+        solver.push()
+        recirculations = recirculations + 1
+        solver.add(AtMost(*relaxation_variables, recirculations))
     
-    return solver.model(), cost
+    return solver.model(), recirculations
 
 
-def main():
-    n, m, mr, ns, mc, d_number, f = parse_input(sys.stdin.read())
+def get_hard_clauses(placement, switch_positions, n, m, mr, ns, mc, f):
+    hard_clauses = []
 
-    solver = Optimize()
-    placement = [(Int(f"{i}_sw"), Int(f"{i}_st")) for i in range(1, n + 1)]
-    
     # Constraint 1.1
     for index, (sw, st) in enumerate(placement):
         # Constraint 1.1.1
-        solver.add(And(1 <= st, 1 <= sw, sw <= m))
+        hard_clauses.append(And(1 <= st, 1 <= sw, sw <= m))
         clause = []
         for switch in range(1, m + 1):
             clause.append(sw != switch if mc[switch - 1] < mr[index] else Implies(sw == switch, st <= ns[switch - 1]))
-        solver.add(And(*clause))
+        hard_clauses.append(And(*clause))
     
     # Constraint 1.2
     for switch in range(1, m + 1):
@@ -374,10 +353,9 @@ def main():
             for rule, (sw, st) in enumerate(placement):
                 parcels.append(If(And(sw == switch, st == stage), mr[rule], 0))
             # Constraint 1.2.1
-            solver.add(0 < Sum(*parcels))
-            solver.add(Sum(*parcels) <= mc[switch - 1])
+            hard_clauses.append(0 < Sum(*parcels))
+            hard_clauses.append(Sum(*parcels) <= mc[switch - 1])
 
-    switch_positions = [i for i in range(1, m + 1)]
 
     # Constraint 1.3
     if m > 1:
@@ -391,8 +369,7 @@ def main():
         }
 
         # Constraint 1.3.1
-        solver.add(
-            [
+        hard_clauses = hard_clauses + [
                 Xor(
                     precedences[preceding_switch][succeeding_switch],
                     precedences[succeeding_switch][preceding_switch]
@@ -401,14 +378,32 @@ def main():
                 for succeeding_switch in range(1, m + 1)
                 if preceding_switch != succeeding_switch
             ]
-        )
+
+        # Ensure total ordering of switches
+        if m > 2:
+            for switch in range(1, m + 1):
+                for switch2 in range(1, m + 1):
+                    if switch2 == switch:
+                        continue
+                    for switch3 in range(1, m + 1):
+                        if switch3 == switch2 or switch3 == switch:
+                            continue
+                        hard_clauses.append(
+                            Implies(
+                                And(
+                                    precedences[switch][switch2], 
+                                    precedences[switch2][switch3]
+                                ), 
+                                precedences[switch][switch3]
+                            )
+                        )
 
         # Constraint 1.3.2
         for preceding_rule, succeeding_rule in f:
             for preceding_switch in range(1, m + 1):
                 for succeeding_switch in range(1, m + 1):
                     if preceding_switch != succeeding_switch:
-                        solver.add(
+                        hard_clauses.append(
                             Implies(
                                 And(
                                     placement[preceding_rule - 1][0] == preceding_switch,
@@ -417,9 +412,12 @@ def main():
                                 precedences[preceding_switch][succeeding_switch]
                             )
                         )
+    return hard_clauses
 
-    # Objective function minimization (soft clauses)
+
+def get_objective_function(placement, f):
     soft_clauses = []
+
     for preceding_rule, succeeding_rule in f:
         soft_clauses.append(
             Not(
@@ -430,6 +428,19 @@ def main():
             )
         )
 
+    return soft_clauses
+
+
+
+
+def main():
+    n, m, mr, ns, mc, d_number, f = parse_input(sys.stdin.read())
+    
+    placement = [(Int(f"{i}_sw"), Int(f"{i}_st")) for i in range(1, n + 1)]
+    switch_positions = [i for i in range(1, m + 1)]
+    hard_clauses = get_hard_clauses(placement, switch_positions, n, m, mr, ns, mc, f)
+    soft_clauses = get_objective_function(placement, f)
+    
     ##############################################################################################
     # print results ##############################################################################
     ##############################################################################################
@@ -439,7 +450,10 @@ def main():
     # tried, see above for the different algorithms tested (several variables influence these
     # results, e.g. z3's Solver::assert_and_track is much slower than a simple 
     # Solver::assert_exprs)
-    model, recirculations = max_sat_inc(solver.assertions(), soft_clauses)
+    model, recirculations = divide_and_conquer_smt(hard_clauses, soft_clauses, n, f)
+    # model, recirculations = max_sat_fm(hard_clauses, soft_clauses)
+    # model, recirculations = max_sat_msu3(hard_clauses, soft_clauses)
+    # model, recirculations = max_sat_inc(hard_clauses, soft_clauses)
     print(time.time() - start)
 
     switches = [[] for _ in range(1, n + 1)]
