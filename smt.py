@@ -74,7 +74,7 @@ def soft_clause_partitioning(n, f):
     return filtered_communities, connection_strength
 
 
-def merge_partitions(connection_strength, relaxed_clauses, relaxation_variables, lambdas):
+def merge_partitions(connection_strength, relaxed_clauses, lambdas):
     # Get max strength of connection between any two communities
     first_community, temp = \
         max(enumerate((max(enumerate(vec), key=itemgetter(1))) for vec in connection_strength), key=itemgetter(1, 1))
@@ -102,9 +102,6 @@ def merge_partitions(connection_strength, relaxed_clauses, relaxation_variables,
     first_clause_set = relaxed_clauses.pop(second_community)
     second_clause_set = relaxed_clauses.pop(first_community)
     relaxed_clauses.append(first_clause_set + second_clause_set)
-    first_relaxation_variable_set = relaxation_variables.pop(second_community)
-    second_relaxation_variable_set = relaxation_variables.pop(first_community)
-    relaxation_variables.append(first_relaxation_variable_set + second_relaxation_variable_set)
     first_lambda = lambdas.pop(second_community)
     second_lambda = lambdas.pop(first_community)
     lambdas.append(first_lambda + second_lambda)
@@ -117,12 +114,11 @@ def divide_and_conquer_smt(hard_clauses, soft_clauses, n, f):
     if solver.check() != sat:
         raise Exception("UNSATISFIABLE")
 
-    recirculations = [0] * len(partition)
     partitioned_clauses = []
-    relaxation_variables = [] 
     model = []
 
     partition, connection = soft_clause_partitioning(n, f)
+    recirculations = [0] * len(partition)
 
     for community, clauses in enumerate(partition):
         partitioned_clauses.append([soft_clauses[int(index)] for index in clauses])
@@ -130,9 +126,9 @@ def divide_and_conquer_smt(hard_clauses, soft_clauses, n, f):
 
     print(len(partition), "communities found")
 
-    while len(relaxed_clauses) > 1:
-        merge_partitions(connection, relaxed_clauses, relaxation_variables, recirculations)
-        model, recirculations[-1] = max_sat_inc(hard_clauses, relaxed_clauses[-1], recirculations[-1])
+    while len(partitioned_clauses) > 1:
+        merge_partitions(connection, partitioned_clauses, recirculations)
+        model, recirculations[-1] = max_sat_inc(hard_clauses, partitioned_clauses[-1], recirculations[-1])
 
     return solver.model(), recirculations[-1]
 
@@ -226,7 +222,6 @@ def max_sat_inc(hard_clauses, soft_clauses, recirculations = 0):
     solver.add(hard_clauses)
     if solver.check() != sat:
         raise Exception("UNSATISFIABLE")
-    return solver.model(), 0
     
     # Optimize soltion
     relaxed_clauses = []
